@@ -5,6 +5,8 @@ import codecs
 import os
 import re
 
+# from Cython.Build import cythonize
+
 here = os.path.abspath(os.path.dirname(__file__))
 
 def read(*parts):
@@ -58,5 +60,6 @@ setup(
         'Operating System :: OS Independent',
         'Topic :: Scientific/Engineering',
         ],
-    extras_require={'implicit_algorithms': ['scipy>=0.13']}
+    extras_require={'implicit_algorithms': ['scipy>=0.13']},
+    # ext_modules = cythonize("sdeint/integrate.pyx")
 )
