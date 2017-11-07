@@ -35,6 +35,39 @@ import numpy as np
 import numbers
 from numpy import linalg as la
 
+def der(f, y, i, t, eps = 1e-20):
+    """Derivative approximation.
+
+    Args:
+      f: callable(y, t) for which to evaluate derivative
+      y: array of shape (d,) where to evaluate derivative
+      i: index of input to take partial derivative
+      t: time
+      eps: precision for numerical derivative
+
+    Returns:
+      numerical partial derivative of f at (y,t)
+
+    """
+    y = np.array(y, dtype=complex)
+    y[i] += 1j*eps
+    return (f(y, t)).imag / eps
+
+
+def gen_H_numerical(G, eps = 1e-20):
+    """Generate tensor for second order Milstein correction numerically.
+
+    Args:
+      G: callable(y, t) returning (d,m) array
+         Matrix-valued function to define the noise coefficients of the system
+      eps: precision for numerical derivative
+
+    """
+    def H_num(y, t, eps = eps):
+        DG = np.stack([der(G, y, i, t, eps) for i in range(len(y))])
+        return np.swapaxes(np.tensordot(G(y,t), DG, axes=([0,0])), 0, 1)
+    return H_num
+
 
 class Error(Exception):
     pass
@@ -45,7 +78,7 @@ class SDEValueError(Error):
     pass
 
 
-def _check_args(f, G, y0, tspan, dW=None, IJ=None):
+def _check_args(f, G, y0, tspan, dW=None, IJ=None, H=None):
     """Do some validation common to all algorithms. Find dimension d and number
     of Wiener processes m.
     """
@@ -61,12 +94,12 @@ def _check_args(f, G, y0, tspan, dW=None, IJ=None):
         y0 = np.array([y0], dtype=numtype)
         def make_vector_fn(fn):
             def newfn(y, t):
-                return np.array([fn(y[0], t)], dtype=numtype)
+                return np.array([fn(y[0], t)])
             newfn.__name__ = fn.__name__
             return newfn
         def make_matrix_fn(fn):
             def newfn(y, t):
-                return np.array([[fn(y[0], t)]], dtype=numtype)
+                return np.array([[fn(y[0], t)]])
             newfn.__name__ = fn.__name__
             return newfn
         if isinstance(f(y0_orig, tspan[0]), numbers.Number):
@@ -113,10 +146,25 @@ def _check_args(f, G, y0, tspan, dW=None, IJ=None):
     if IJ is not None:
         if not hasattr(IJ, 'shape') or IJ.shape != (len(tspan) - 1, m, m):
             raise SDEValueError(message)
+    if H is not None:
+        if callable(H):
+            # then H must be a function returning a d x m x m tensor
+            Htest = H(y0, tspan[0])
+            if Htest.shape[0] != d:
+                raise SDEValueError("""y0 has length %d, but this does not match
+                    the first dimension of H(y0, tspan[0]).""" % d)
+            if Htest.shape[1] != Htest.shape[2]:
+                raise SDEValueError("""The last two dimensions of H should
+                    match, but they are %d, %d""" % (Htest.shape[1], Htest.shape[2] ) )
+            if Htest.shape[1] != m:
+                raise SDEValueError("""The last two dimensions of H match,
+                    but are not equal to m==%d, the second dimension of G""" % d)
+        else:
+            raise NotImplementedError("Currently H must be callable if used.")
     return (d, m, f, G, y0, tspan, dW, IJ)
 
 
-def itoint(f, G, y0, tspan, normalized=True):
+def itoint(f, G, y0, tspan, normalized=False):
     """ Numerically integrate Ito equation  dy = f dt + G dW
     """
     # In future versions we can automatically choose here the most suitable
@@ -126,7 +174,7 @@ def itoint(f, G, y0, tspan, normalized=True):
     return chosenAlgorithm(f, G, y0, tspan, normalized=normalized)
 
 
-def stratint(f, G, y0, tspan, normalized=True):
+def stratint(f, G, y0, tspan, normalized=False):
     """ Numerically integrate Stratonovich equation  dy = f dt + G \circ dW
     """
     # In future versions we can automatically choose here the most suitable
@@ -136,7 +184,7 @@ def stratint(f, G, y0, tspan, normalized=True):
     return chosenAlgorithm(f, G, y0, tspan, normalized=normalized)
 
 
-def itoEuler(f, G, y0, tspan, dW=None, normalized=True):
+def itoEuler(f, G, y0, tspan, dW=None, normalized=False):
     """Use the Euler-Maruyama algorithm to integrate the Ito equation
     dy = f(y,t)dt + G(y,t) dW(t)
 
@@ -186,8 +234,73 @@ def itoEuler(f, G, y0, tspan, dW=None, normalized=True):
             y[n+1] /= la.norm(y[n+1])
     return y
 
+def itoMilstein(f, G, H, y0, tspan, Imethod=Ikpw, dW=None, I=None, normalized=False):
+    """
+    Args:
+      f: callable(y, t) returning (d,) array
+         Vector-valued function to define the deterministic part of the system
+      G: callable(y, t) returning (d,m) array
+         Matrix-valued function to define the noise coefficients of the system
+      H: callable(y, t) returning (d,m,m) array
+         Tensor-valued function to define the Milstein correction term.
+      y0: array of shape (d,) giving the initial state vector y(t==0)
+      tspan (array): The sequence of time points for which to solve for y.
+        These must be equally spaced, e.g. np.arange(0,10,0.005)
+        tspan[0] is the intial time corresponding to the initial state y0.
+      dW: optional array of shape (len(tspan)-1, d). This is for advanced use,
+        if you want to use a specific realization of the d independent Wiener
+        processes. If not provided Wiener increments will be generated randomly
 
-def stratHeun(f, G, y0, tspan, dW=None, normalized=True):
+    """
+    (d, m, f, G, y0, tspan, dW, I) = _check_args(f, G, y0, tspan, dW, I, H)
+    N = len(tspan)
+    h = (tspan[N-1] - tspan[0])/(N - 1)
+    # allocate space for result
+    y = np.zeros((N, d), dtype=type(y0[0]))
+    if dW is None:
+        # pre-generate Wiener increments (for m independent Wiener processes):
+        dW = deltaW(N - 1, m, h)
+    if I is None:
+        # pre-generate repeated stochastic integrals for each time step.
+        __, I = Imethod(dW, h) # shape (N, m, m)
+
+    y[0] = y0;
+    for n in range(0, N-1):
+        tn = tspan[n]
+        yn = y[n]
+        dWn = dW[n,:]
+        Iij = I[n,:,:]
+        fn = f(yn, tn)
+        Gn = G(yn, tn)
+        Hn = H(yn, tn)
+        y[n+1] = (yn + fn*h + Gn.dot(dWn) +
+            np.dot(Hn.reshape(d, m**2), Iij.ravel()) )
+        if normalized:
+            y[n+1] /= la.norm(y[n+1])
+    return y
+
+def numItoMilstein(f, G, y0, tspan, Imethod=Ikpw, dW=None, I=None, normalized=False, eps=1e-20):
+    """
+    Args:
+      f: callable(y, t) returning (d,) array
+         Vector-valued function to define the deterministic part of the system
+      G: callable(y, t) returning (d,m) array
+         Matrix-valued function to define the noise coefficients of the system
+      y0: array of shape (d,) giving the initial state vector y(t==0)
+      tspan (array): The sequence of time points for which to solve for y.
+        These must be equally spaced, e.g. np.arange(0,10,0.005)
+        tspan[0] is the intial time corresponding to the initial state y0.
+      dW: optional array of shape (len(tspan)-1, d). This is for advanced use,
+        if you want to use a specific realization of the d independent Wiener
+        processes. If not provided Wiener increments will be generated randomly
+
+    """
+    (d, m, f, G, y0, tspan, dW, I) = _check_args(f, G, y0, tspan, dW, I, None)
+    H = gen_H_numerical(G, eps=eps)
+    return itoMilstein(f, G, H, y0, tspan, Imethod=Imethod, dW=dW, I=I, normalized=normalized)
+
+
+def stratHeun(f, G, y0, tspan, dW=None, normalized=False):
     """Use the Stratonovich Heun algorithm to integrate Stratonovich equation
     dy = f(y,t)dt + G(y,t) \circ dW(t)
 
@@ -248,7 +361,7 @@ def stratHeun(f, G, y0, tspan, dW=None, normalized=True):
     return y
 
 
-def itoSRI2(f, G, y0, tspan, Imethod=Ikpw, dW=None, I=None, normalized = True):
+def itoSRI2(f, G, y0, tspan, Imethod=Ikpw, dW=None, I=None, normalized=False):
     """Use the Roessler2010 order 1.0 strong Stochastic Runge-Kutta algorithm
     SRI2 to integrate an Ito equation dy = f(y,t)dt + G(y,t)dW(t)
 
@@ -310,7 +423,7 @@ def itoSRI2(f, G, y0, tspan, Imethod=Ikpw, dW=None, I=None, normalized = True):
     return _Roessler2010_SRK2(f, G, y0, tspan, Imethod, dW, I, normalized)
 
 
-def stratSRS2(f, G, y0, tspan, Jmethod=Jkpw, dW=None, J=None, normalized=True):
+def stratSRS2(f, G, y0, tspan, Jmethod=Jkpw, dW=None, J=None, normalized=False):
     """Use the Roessler2010 order 1.0 strong Stochastic Runge-Kutta algorithm
     SRS2 to integrate a Stratonovich equation dy = f(y,t)dt + G(y,t)\circ dW(t)
 
@@ -372,7 +485,7 @@ def stratSRS2(f, G, y0, tspan, Jmethod=Jkpw, dW=None, J=None, normalized=True):
     return _Roessler2010_SRK2(f, G, y0, tspan, Jmethod, dW, J, normalized)
 
 
-def _Roessler2010_SRK2(f, G, y0, tspan, IJmethod, dW=None, IJ=None, normalized = True):
+def _Roessler2010_SRK2(f, G, y0, tspan, IJmethod, dW=None, IJ=None, normalized=False):
     """Implements the Roessler2010 order 1.0 strong Stochastic Runge-Kutta
     algorithms SRI2 (for Ito equations) and SRS2 (for Stratonovich equations).
 
@@ -460,7 +573,7 @@ def _Roessler2010_SRK2(f, G, y0, tspan, IJmethod, dW=None, IJ=None, normalized =
 
 
 def stratKP2iS(f, G, y0, tspan, Jmethod=Jkpw, gam=None, al1=None, al2=None,
-               rtol=1e-4, dW=None, J=None, normalized = True):
+               rtol=1e-4, dW=None, J=None, normalized=False):
     """Use the Kloeden and Platen two-step implicit order 1.0 strong algorithm
     to integrate a Stratonovich equation dy = f(y,t)dt + G(y,t)\circ dW(t)
 
