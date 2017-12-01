@@ -184,7 +184,7 @@ def stratint(f, G, y0, tspan, normalized=False):
     return chosenAlgorithm(f, G, y0, tspan, normalized=normalized)
 
 
-def itoEuler(f, G, y0, tspan, dW=None, normalized=False):
+def itoEuler(f, G, y0, tspan, dW=None, normalized=False, downsample=1):
     """Use the Euler-Maruyama algorithm to integrate the Ito equation
     dy = f(y,t)dt + G(y,t) dW(t)
 
@@ -204,6 +204,7 @@ def itoEuler(f, G, y0, tspan, dW=None, normalized=False):
       dW: optional array of shape (len(tspan)-1, d). This is for advanced use,
         if you want to use a specific realization of the d independent Wiener
         processes. If not provided Wiener increments will be generated randomly
+      downsample: optional, integer to indicate how frequently to save values.
 
     Returns:
       y: array, with shape (len(tspan), len(y0))
@@ -218,23 +219,29 @@ def itoEuler(f, G, y0, tspan, dW=None, normalized=False):
     """
     (d, m, f, G, y0, tspan, dW, __) = _check_args(f, G, y0, tspan, dW, None)
     N = len(tspan)
+    N_record = int((N-1)/downsample)+1
     h = (tspan[N-1] - tspan[0])/(N - 1)
     # allocate space for result
-    y = np.zeros((N, d), dtype=type(y0[0]))
+    y = np.zeros((N_record, d), dtype=type(y0[0]))
     if dW is None:
         # pre-generate Wiener increments (for m independent Wiener processes):
         dW = deltaW(N - 1, m, h)
-    y[0] = y0;
+
+    y[0] = y0
+    y_next = y[0]
     for n in range(0, N-1):
         tn = tspan[n]
-        yn = y[n]
+        yn = y_next
         dWn = dW[n,:]
-        y[n+1] = yn + f(yn, tn)*h + G(yn, tn).dot(dWn)
+        y_next = yn + f(yn, tn)*h + G(yn, tn).dot(dWn)
         if normalized:
-            y[n+1] /= la.norm(y[n+1])
+            y_next /= la.norm(y_next)
+        if n % downsample == 0:
+            y[int((n-1)/downsample)+1] = y_next
     return y
 
-def itoMilstein(f, G, H, y0, tspan, Imethod=Ikpw, dW=None, I=None, normalized=False):
+def itoMilstein(f, G, H, y0, tspan, Imethod=Ikpw, dW=None, I=None,
+    normalized=False, downsample=1):
     """
     Args:
       f: callable(y, t) returning (d,) array
@@ -250,13 +257,15 @@ def itoMilstein(f, G, H, y0, tspan, Imethod=Ikpw, dW=None, I=None, normalized=Fa
       dW: optional array of shape (len(tspan)-1, d). This is for advanced use,
         if you want to use a specific realization of the d independent Wiener
         processes. If not provided Wiener increments will be generated randomly
+      downsample: optional, integer to indicate how frequently to save values.
 
     """
     (d, m, f, G, y0, tspan, dW, I) = _check_args(f, G, y0, tspan, dW, I, H)
     N = len(tspan)
+    N_record = int((N-1)/downsample)+1
     h = (tspan[N-1] - tspan[0])/(N - 1)
     # allocate space for result
-    y = np.zeros((N, d), dtype=type(y0[0]))
+    y = np.zeros((N_record, d), dtype=type(y0[0]))
     if dW is None:
         # pre-generate Wiener increments (for m independent Wiener processes):
         dW = deltaW(N - 1, m, h)
@@ -264,22 +273,25 @@ def itoMilstein(f, G, H, y0, tspan, Imethod=Ikpw, dW=None, I=None, normalized=Fa
         # pre-generate repeated stochastic integrals for each time step.
         __, I = Imethod(dW, h) # shape (N, m, m)
 
-    y[0] = y0;
+    y[0] = y0
+    y_next = y[0]
     for n in range(0, N-1):
         tn = tspan[n]
-        yn = y[n]
+        yn = y_next
         dWn = dW[n,:]
         Iij = I[n,:,:]
         fn = f(yn, tn)
         Gn = G(yn, tn)
         Hn = H(yn, tn)
-        y[n+1] = (yn + fn*h + Gn.dot(dWn) +
+        y_next = (yn + fn*h + Gn.dot(dWn) +
             np.dot(Hn.reshape(d, m**2), Iij.ravel()) )
         if normalized:
-            y[n+1] /= la.norm(y[n+1])
+            y_next /= la.norm(y_next)
+        if n % downsample == 0:
+            y[int((n-1)/downsample)+1] = y_next
     return y
 
-def numItoMilstein(f, G, y0, tspan, Imethod=Ikpw, dW=None, I=None, normalized=False, eps=1e-20):
+def numItoMilstein(f, G, y0, tspan, Imethod=Ikpw, dW=None, I=None, normalized=False, downsample=1, eps=1e-20):
     """
     Args:
       f: callable(y, t) returning (d,) array
@@ -297,7 +309,7 @@ def numItoMilstein(f, G, y0, tspan, Imethod=Ikpw, dW=None, I=None, normalized=Fa
     """
     (d, m, f, G, y0, tspan, dW, I) = _check_args(f, G, y0, tspan, dW, I, None)
     H = gen_H_numerical(G, eps=eps)
-    return itoMilstein(f, G, H, y0, tspan, Imethod=Imethod, dW=dW, I=I, normalized=normalized)
+    return itoMilstein(f, G, H, y0, tspan, Imethod=Imethod, dW=dW, I=I, normalized=normalized, downsample=downsample)
 
 
 def stratHeun(f, G, y0, tspan, dW=None, normalized=False):
@@ -361,7 +373,7 @@ def stratHeun(f, G, y0, tspan, dW=None, normalized=False):
     return y
 
 
-def itoSRI2(f, G, y0, tspan, Imethod=Ikpw, dW=None, I=None, normalized=False):
+def itoSRI2(f, G, y0, tspan, Imethod=Ikpw, dW=None, I=None, normalized=False, downsample=1):
     """Use the Roessler2010 order 1.0 strong Stochastic Runge-Kutta algorithm
     SRI2 to integrate an Ito equation dy = f(y,t)dt + G(y,t)dW(t)
 
@@ -420,7 +432,7 @@ def itoSRI2(f, G, y0, tspan, Imethod=Ikpw, dW=None, I=None, normalized=False):
       A. Roessler (2010) Runge-Kutta Methods for the Strong Approximation of
         Solutions of Stochastic Differential Equations
     """
-    return _Roessler2010_SRK2(f, G, y0, tspan, Imethod, dW, I, normalized)
+    return _Roessler2010_SRK2(f, G, y0, tspan, Imethod, dW, I, normalized, downsample)
 
 
 def stratSRS2(f, G, y0, tspan, Jmethod=Jkpw, dW=None, J=None, normalized=False):
@@ -485,7 +497,7 @@ def stratSRS2(f, G, y0, tspan, Jmethod=Jkpw, dW=None, J=None, normalized=False):
     return _Roessler2010_SRK2(f, G, y0, tspan, Jmethod, dW, J, normalized)
 
 
-def _Roessler2010_SRK2(f, G, y0, tspan, IJmethod, dW=None, IJ=None, normalized=False):
+def _Roessler2010_SRK2(f, G, y0, tspan, IJmethod, dW=None, IJ=None, normalized=False, downsample=1):
     """Implements the Roessler2010 order 1.0 strong Stochastic Runge-Kutta
     algorithms SRI2 (for Ito equations) and SRS2 (for Stratonovich equations).
 
@@ -522,8 +534,9 @@ def _Roessler2010_SRK2(f, G, y0, tspan, IJmethod, dW=None, IJ=None, normalized=F
         Solutions of Stochastic Differential Equations
     """
     (d, m, f, G, y0, tspan, dW, IJ) = _check_args(f, G, y0, tspan, dW, IJ)
-    have_separate_g = (not callable(G)) # if G is given as m separate functions
     N = len(tspan)
+    have_separate_g = (not callable(G)) # if G is given as m separate functions
+    N_record = int((N-1)/downsample)+1
     h = (tspan[N-1] - tspan[0])/(N - 1) # assuming equal time steps
     if dW is None:
         # pre-generate Wiener increments (for m independent Wiener processes):
@@ -535,15 +548,16 @@ def _Roessler2010_SRK2(f, G, y0, tspan, IJmethod, dW=None, IJ=None, normalized=F
     else:
         I = IJ
     # allocate space for result
-    y = np.zeros((N, d), dtype=type(y0[0]))
+    y = np.zeros((N_record, d), dtype=type(y0[0]))
     y[0] = y0;
+    Yn1 = y[0]
     Gn = np.zeros((d, m), dtype=y.dtype)
     for n in range(0, N-1):
         tn = tspan[n]
         tn1 = tspan[n+1]
         h = tn1 - tn
         sqrth = np.sqrt(h)
-        Yn = y[n] # shape (d,)
+        Yn = Yn1 # shape (d,)
         Ik = dW[n,:] # shape (m,)
         Iij = I[n,:,:] # shape (m, m)
         fnh = f(Yn, tn)*h # shape (d,)
@@ -568,7 +582,8 @@ def _Roessler2010_SRK2(f, G, y0, tspan, IJmethod, dW=None, IJ=None, normalized=F
                 Yn1 += 0.5*sqrth*(G(H2[:,k], tn1)[:,k] - G(H3[:,k], tn1)[:,k])
         if normalized:
             Yn1 /= la.norm(Yn1)
-        y[n+1] = Yn1
+        if n % downsample == 0:
+            y[int((n-1)/downsample)+1] = Yn1
     return y
 
 
