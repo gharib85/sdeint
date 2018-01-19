@@ -238,7 +238,179 @@ def itoEuler(f, G, y0, tspan, dW=None, normalized=False, downsample=1):
             y_next /= la.norm(y_next)
         if n % downsample == 0:
             y[int((n-1)/downsample)+1] = y_next
-    return y
+    return {"trajectory": y}
+
+def itoImplicitEuler(f, G, y0, tspan, dW=None, normalized=False, downsample=1, implicit_type = "implicit"):
+    """Use the Implicit Euler-Maruyama algorithm to integrate the Ito equation
+    dy = f(y,t)dt + G(y,t) dW(t). The implicit step is taken by using an initial
+    approximation from the explicit equation (and repeated once more).
+
+    The implicit step can be taken either for diffusion, drift, or both terms.
+    This is specified by the implicit_type argument.
+
+    where y is the d-dimensional state vector, f is a vector-valued function,
+    G is an d x m matrix-valued function giving the noise coefficients and
+    dW(t) = (dW_1, dW_2, ... dW_m) is a vector of independent Wiener increments
+
+    Args:
+      f: callable(y, t) returning (d,) array
+         Vector-valued function to define the deterministic part of the system
+      G: callable(y, t) returning (d,m) array
+         Matrix-valued function to define the noise coefficients of the system
+      y0: array of shape (d,) giving the initial state vector y(t==0)
+      tspan (array): The sequence of time points for which to solve for y.
+        These must be equally spaced, e.g. np.arange(0,10,0.005)
+        tspan[0] is the intial time corresponding to the initial state y0.
+      dW: optional array of shape (len(tspan)-1, d). This is for advanced use,
+        if you want to use a specific realization of the d independent Wiener
+        processes. If not provided Wiener increments will be generated randomly
+      downsample: optional, integer to indicate how frequently to save values.
+      implicit_type: Which implicit step type to use.
+        "implicit", "semi_implicit_drift", or "semi_implicit_diffusion".
+
+    Returns:
+      y: array, with shape (len(tspan), len(y0))
+         With the initial value y0 in the first row
+
+    Raises:
+      SDEValueError
+
+    See also:
+      G. Maruyama (1955) Continuous Markov processes and stochastic equations
+      Kloeden and Platen (1999) Numerical Solution of Differential Equations
+    """
+    (d, m, f, G, y0, tspan, dW, __) = _check_args(f, G, y0, tspan, dW, None)
+    assert implicit_type in ["implicit",
+                             "semi_implicit_drift",
+                             "semi_implicit_diffusion"]
+    N = len(tspan)
+    N_record = int((N-1)/downsample)+1
+    h = (tspan[N-1] - tspan[0])/(N - 1)
+    # allocate space for result
+    y = np.zeros((N_record, d), dtype=type(y0[0]))
+    norms = np.zeros((N_record), dtype=type(y0[0]))
+    if dW is None:
+        # pre-generate Wiener increments (for m independent Wiener processes):
+        dW = deltaW(N - 1, m, h)
+
+    def implicit_step(yn, y_next, tn, dWn):
+        if implicit_type == "implicit":
+            y_next = yn + f(y_next, tn)*h + G(y_next, tn).dot(dWn)
+        elif implicit_type == "semi_implicit_drift":
+            y_next = yn + f(y_next, tn)*h + G(yn, tn).dot(dWn)
+        else:
+            y_next = yn + f(yn, tn)*h + G(y_next, tn).dot(dWn)
+
+        norm_next = la.norm(y_next)
+        if n % downsample == 0:
+            norms[int((n-1)/downsample)+1] = norm_next
+        if normalized:
+            y_next /= norm_next
+        return y_next
+
+    y[0] = y0
+    y_next = y[0]
+    for n in range(0, N-1):
+        tn = tspan[n]
+        yn = y_next
+        dWn = dW[n,:]
+
+        ## initial approximation using explicit step
+        y_next = implicit_step(yn, yn, tn, dWn)
+
+        ## updated approximation using implicit step
+        for _ in range(2):
+            y_next = implicit_step(yn, y_next, tn, dWn)
+
+        if n % downsample == 0:
+            y[int((n-1)/downsample)+1] = y_next
+    return {"trajectory": y, "norms": norms}
+
+
+def itoQuasiImplicitEuler(f, G, y0, tspan, dW=None, normalized=False, downsample=1, implicit_ports = None):
+    """Use the Implicit Euler-Maruyama algorithm to integrate the Ito equation
+    dy = f(y,t)dt + G(y,t) dW(t), where implicit steps are taken over only ports
+    specified as implicit_ports.
+
+    where y is the d-dimensional state vector, f is a vector-valued function,
+    G is an d x m matrix-valued function giving the noise coefficients and
+    dW(t) = (dW_1, dW_2, ... dW_m) is a vector of independent Wiener increments
+
+    Args:
+      f: callable(y, t) returning (d,) array
+         Vector-valued function to define the deterministic part of the system
+      G: callable(y, t) returning (d,m) array
+         Matrix-valued function to define the noise coefficients of the system
+      y0: array of shape (d,) giving the initial state vector y(t==0)
+      tspan (array): The sequence of time points for which to solve for y.
+        These must be equally spaced, e.g. np.arange(0,10,0.005)
+        tspan[0] is the intial time corresponding to the initial state y0.
+      dW: optional array of shape (len(tspan)-1, d). This is for advanced use,
+        if you want to use a specific realization of the d independent Wiener
+        processes. If not provided Wiener increments will be generated randomly
+      downsample: optional, integer to indicate how frequently to save values.
+      implicit_ports: array of indices
+        which noise terms become implicit. The rest are explicit.
+
+    Returns:
+      y: array, with shape (len(tspan), len(y0))
+         With the initial value y0 in the first row
+
+    Raises:
+      SDEValueError
+
+    See also:
+      G. Maruyama (1955) Continuous Markov processes and stochastic equations
+      Kloeden and Platen (1999) Numerical Solution of Differential Equations
+    """
+    (d, m, f, G, y0, tspan, dW, __) = _check_args(f, G, y0, tspan, dW, None)
+    explicit_ports = [i for i in range(m) if i not in implicit_ports]
+    if implicit_ports is None:
+        implicit_ports = []
+
+    N = len(tspan)
+    N_record = int((N-1)/downsample)+1
+    h = (tspan[N-1] - tspan[0])/(N - 1)
+    # allocate space for result
+    y = np.zeros((N_record, d), dtype=type(y0[0]))
+    norms = np.zeros((N_record), dtype=type(y0[0]))
+    if dW is None:
+        # pre-generate Wiener increments (for m independent Wiener processes):
+        dW = deltaW(N - 1, m, h)
+
+    y[0] = y0
+    y_next = y[0]
+    for n in range(0, N-1):
+        tn = tspan[n]
+        yn = y_next
+        dWn = dW[n,:]
+        fn = f(yn, tn)
+        Gn = G(yn, tn)
+        Ge = Gn[:,explicit_ports]
+        Gi = Gn[:,implicit_ports]
+        dWn_explicit = dWn[explicit_ports]
+        dWn_implicit = dWn[implicit_ports]
+        GedWn = Ge.dot(dWn_explicit)
+        GidWn = Gi.dot(dWn_implicit)
+
+        ## explicit approximation neglecting all noise
+        y_explicit_noise = yn + fn*h + GedWn
+        ## initial approximation using explicit step
+        y_tilde = y_explicit_noise + GidWn
+        if normalized:
+            y_tilde /= la.norm(y_tilde)
+
+        ## updated approximation using implicit step on selected noise terms
+        y_next = y_explicit_noise + G(y_tilde, tn+h)[:,implicit_ports].dot(dWn_implicit)
+
+        norm_next = la.norm(y_next)
+        if n % downsample == 0:
+            norms[int((n-1)/downsample)+1] = norm_next
+        if normalized:
+            y_next /= norm_next
+        if n % downsample == 0:
+            y[int((n-1)/downsample)+1] = y_next
+    return {"trajectory": y, "norms": norms}
 
 def itoMilstein(f, G, H, y0, tspan, Imethod=Ikpw, dW=None, I=None,
     normalized=False, downsample=1):
@@ -289,7 +461,7 @@ def itoMilstein(f, G, H, y0, tspan, Imethod=Ikpw, dW=None, I=None,
             y_next /= la.norm(y_next)
         if n % downsample == 0:
             y[int((n-1)/downsample)+1] = y_next
-    return y
+    return {"trajectory": y}
 
 def numItoMilstein(f, G, y0, tspan, Imethod=Ikpw, dW=None, I=None, normalized=False, downsample=1, eps=1e-20):
     """
@@ -370,7 +542,7 @@ def stratHeun(f, G, y0, tspan, dW=None, normalized=False):
         y[n+1] = yn + 0.5*(fn + fnbar)*h + 0.5*(Gn + Gnbar).dot(dWn)
         if normalized:
             y[n+1] /= la.norm(y[n+1])
-    return y
+    return {"trajectory": y}
 
 
 def itoSRI2(f, G, y0, tspan, Imethod=Ikpw, dW=None, I=None, normalized=False, downsample=1):
@@ -560,6 +732,7 @@ def _Roessler2010_SRK2(f, G, y0, tspan, IJmethod, dW=None, IJ=None, normalized=F
         Yn = Yn1 # shape (d,)
         Ik = dW[n,:] # shape (m,)
         Iij = I[n,:,:] # shape (m, m)
+
         fnh = f(Yn, tn)*h # shape (d,)
         if have_separate_g:
             for k in range(0, m):
@@ -570,7 +743,6 @@ def _Roessler2010_SRK2(f, G, y0, tspan, IJmethod, dW=None, IJ=None, normalized=F
         H20 = Yn + fnh # shape (d,)
         H20b = np.reshape(H20, (d, 1))
         H2 = H20b + sum1 # shape (d, m)
-        H30 = Yn
         H3 = H20b - sum1
         fn1h = f(H20, tn1)*h
         Yn1 = Yn + 0.5*(fnh + fn1h) + Gn.dot(Ik)
@@ -584,8 +756,7 @@ def _Roessler2010_SRK2(f, G, y0, tspan, IJmethod, dW=None, IJ=None, normalized=F
             Yn1 /= la.norm(Yn1)
         if n % downsample == 0:
             y[int((n-1)/downsample)+1] = Yn1
-    return y
-
+    return {"trajectory": y}
 
 def stratKP2iS(f, G, y0, tspan, Jmethod=Jkpw, gam=None, al1=None, al2=None,
                rtol=1e-4, dW=None, J=None, normalized=False):
@@ -705,4 +876,4 @@ def stratKP2iS(f, G, y0, tspan, Jmethod=Jkpw, gam=None, al1=None, al2=None,
             m = """At time t_n = %g Failed to solve for Y_{n+1} with args %s.
                 Reason: %s""" % (tn, args, msg)
             raise RuntimeError(m)
-    return y
+    return {"trajectory": y}
